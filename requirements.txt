@@ -1,9 +1,12 @@
-# requirements.txt - FINAL VERSION
+# requirements.txt - FINAL CORRECTED VERSION
 streamlit
 databricks-sqlalchemy==2.0.8
 sqlalchemy==2.0.23
 numpy==1.26.4
 protobuf==4.25.3
 langchain
+langchain-core
+langchain-community
 langchain-openai
 python-dotenv
+altair
