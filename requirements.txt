@@ -1,0 +1,4 @@
+# requirements.txt
+streamlit
+databricks-sql-connector
+python-dotenv
