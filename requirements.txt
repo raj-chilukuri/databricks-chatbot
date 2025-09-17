@@ -1,4 +1,9 @@
-# requirements.txt
+# requirements.txt - FINAL VERSION
 streamlit
-databricks-sql-connector
+databricks-sqlalchemy==2.0.8
+sqlalchemy==2.0.23
+numpy==1.26.4
+protobuf==4.25.3
+langchain
+langchain-openai
 python-dotenv

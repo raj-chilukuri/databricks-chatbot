@@ -1,71 +1,78 @@
-# app.py
+# app.py - FINAL WORKING VERSION for DEPLOYMENT
+
 import streamlit as st
 import os
 from dotenv import load_dotenv
-from databricks import sql
 
-# --- 1. SETUP & DATABASE CONNECTION ---
-load_dotenv() # This will be used for local testing, Streamlit Cloud uses its own secret management
+from langchain_openai import ChatOpenAI
+from langchain_community.utilities import SQLDatabase
+from langchain.agents import create_sql_agent
 
-@st.cache_resource
-def get_db_connection():
-    """Establishes a connection to the Databricks SQL Warehouse."""
-    # Streamlit Cloud will get secrets from its own manager, not a .env file
-    # For local testing, it will use your .env file
-    hostname = os.environ.get("DATABRICKS_SERVER_HOSTNAME")
-    http_path = os.environ.get("DATABRICKS_HTTP_PATH")
-    access_token = os.environ.get("DATABRICKS_TOKEN")
+# --- 1. SETUP ---
+load_dotenv() # Not used by Streamlit Cloud secrets, but good practice
 
-    if not all([hostname, http_path, access_token]):
-        st.error("Databricks credentials not found. Please configure your secrets in Streamlit Community Cloud.")
-        st.stop()
-        
-    return sql.connect(
-        server_hostname=hostname,
-        http_path=http_path,
-        access_token=access_token
+# --- 2. THE AI AGENT & DATABASE CONNECTION ---
+
+@st.cache_resource(show_spinner="Initializing AI Agent...")
+def setup_agent():
+    # In Streamlit Cloud, these will be loaded from the Secrets manager
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    db_host = os.environ.get("DATABRICKS_SERVER_HOSTNAME")
+    db_path = os.environ.get("DATABRICKS_HTTP_PATH")
+    db_token = os.environ.get("DATABRICKS_TOKEN")
+    db_catalog = os.environ.get("DATABRICKS_CATALOG")
+    db_schema = os.environ.get("DATABRICKS_SCHEMA")
+    
+    # Check if secrets are loaded
+    if not all([openai_api_key, db_host, db_path, db_token, db_catalog, db_schema]):
+        raise ValueError("One or more required secrets are missing. Please check your Streamlit Cloud secrets configuration.")
+
+    llm = ChatOpenAI(model="gpt-4", temperature=0, openai_api_key=openai_api_key)
+
+    db_uri = (
+        f"databricks://token:{db_token}@{db_host}?"
+        f"http_path={db_path}&"
+        f"catalog={db_catalog}&"
+        f"schema={db_schema}"
     )
 
-def run_ai_query(question: str) -> str:
-    """Sends the user's question to the Databricks AI Function and returns the answer."""
-    # Sanitize the user's question to prevent SQL injection issues
-    sanitized_question = question.replace("'", "''")
-    
-    with get_db_connection() as connection:
-        with connection.cursor() as cursor:
-            # We use the catalog/schema names we verified work
-            catalog = "workspace" 
-            schema = "default"
-            query = f"SELECT {catalog}.{schema}.ask_my_data('{sanitized_question}')"
-            cursor.execute(query)
-            result = cursor.fetchone()
-            return result[0] if result else "No answer found."
+    db = SQLDatabase.from_uri(db_uri, include_tables=[
+        "workday_employees", "workday_departments", "sap_vendors", 
+        "expensify_reports", "expensify_line_items"
+    ])
 
-# --- 2. THE STREAMLIT USER INTERFACE ---
+    return create_sql_agent(llm=llm, db=db, agent_type="openai-tools")
+
+# --- 3. THE STREAMLIT USER INTERFACE ---
 
 st.set_page_config(page_title="Databricks Chatbot", layout="wide")
 st.title("🤖 Chat with Your Databricks Data")
-st.caption("Hosted on Streamlit Community Cloud | Backend on Databricks")
+st.caption("Final Architecture: Hosted Agent connected to Databricks Cluster")
 
-# Initialize chat history
+try:
+    agent_executor = setup_agent()
+    st.success("AI Agent is initialized and connected to Databricks. Ask away!")
+except Exception as e:
+    st.error(f"Could not initialize AI Agent. Please ensure your All-Purpose Cluster is running and your Streamlit secrets are correct. Error: {e}")
+    st.stop()
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Main chat logic
-if prompt := st.chat_input("Ask about employees, expenses, or vendors..."):
+if prompt := st.chat_input("Ask your question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Databricks AI is thinking and querying..."):
+        with st.spinner("The AI is thinking and querying..."):
             try:
-                answer = run_ai_query(prompt)
+                response = agent_executor.invoke({"input": prompt})
+                answer = response.get("output", "Sorry, I couldn't find an answer.")
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
             except Exception as e:
