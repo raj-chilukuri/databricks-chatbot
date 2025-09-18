@@ -1,105 +1,106 @@
-# app.py — Streamlit + Knowledge Graph (Databricks) + OpenAI
+# ------ replace your connection + loader blocks with this ------
+
 import os, json, ast, time
-from typing import List, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
 from openai import OpenAI
 
-# -----------------------
-# Config (tables/catalog)
-# -----------------------
 CATALOG = os.getenv("DATABRICKS_CATALOG", st.secrets.get("DATABRICKS_CATALOG", "main"))
 SCHEMA  = os.getenv("DATABRICKS_SCHEMA",  st.secrets.get("DATABRICKS_SCHEMA",  "default"))
-
-NODES_T = os.getenv("KG_NODES_TABLE", st.secrets.get("KG_NODES_TABLE", "kg_nodes"))
-EDGES_T = os.getenv("KG_EDGES_TABLE", st.secrets.get("KG_EDGES_TABLE", "kg_edges"))
-EMB_T   = os.getenv("KG_EMB_TABLE",   st.secrets.get("KG_EMB_TABLE",   "kg_embeddings"))
+NODES_T = os.getenv("KG_NODES_TABLE",     st.secrets.get("KG_NODES_TABLE",     "kg_nodes"))
+EDGES_T = os.getenv("KG_EDGES_TABLE",     st.secrets.get("KG_EDGES_TABLE",     "kg_edges"))
+EMB_T   = os.getenv("KG_EMB_TABLE",       st.secrets.get("KG_EMB_TABLE",       "kg_embeddings"))
 
 FULL_NODES = f"{CATALOG}.{SCHEMA}.{NODES_T}"
 FULL_EDGES = f"{CATALOG}.{SCHEMA}.{EDGES_T}"
 FULL_EMB   = f"{CATALOG}.{SCHEMA}.{EMB_T}"
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", st.secrets.get("OPENAI_MODEL", "gpt-4o-mini"))
+# ---- sidebar knobs (put near your sidebar UI) ----
+with st.sidebar:
+    st.subheader("Load controls")
+    MAX_ROWS = st.number_input("Max rows per nodes/edges table", 1000, 200_000, 20_000, step=1000)
+    MAX_EMB  = st.number_input("Embeddings cap (rows)", 1000, 500_000, 50_000, step=1000)
+    PING     = st.button("🏓 Ping warehouse")
 
-# -----------------------
-# Small helpers
-# -----------------------
+# ---- get env/secrets and connect (SQLAlchemy first, DB-API fallback) ----
 def _get_env_or_secret(key: str, default=None):
-    if os.getenv(key):
-        return os.getenv(key)
-    try:
-        return st.secrets.get(key, default)
-    except Exception:
-        return default
+    if os.getenv(key): return os.getenv(key)
+    try: return st.secrets.get(key, default)
+    except Exception: return default
 
-def resolve_dbx_config() -> Tuple[str, str, str]:
-    host = _get_env_or_secret("DATABRICKS_SERVER_HOSTNAME")
-    http_path = _get_env_or_secret("DATABRICKS_HTTP_PATH")
-    token = _get_env_or_secret("DATABRICKS_PERSONAL_ACCESS_TOKEN")
-    return host, http_path, token
+def resolve_dbx_config():
+    return (_get_env_or_secret("DATABRICKS_SERVER_HOSTNAME"),
+            _get_env_or_secret("DATABRICKS_HTTP_PATH"),
+            _get_env_or_secret("DATABRICKS_PERSONAL_ACCESS_TOKEN"))
 
-def _coerce_embedding_cell(x) -> np.ndarray:
-    if isinstance(x, (list, tuple, np.ndarray)):
-        return np.array(x, dtype="float32")
-    if isinstance(x, str):
-        try:
-            return np.array(json.loads(x), dtype="float32")
-        except Exception:
-            return np.array(ast.literal_eval(x), dtype="float32")
-    return np.array([], dtype="float32")
-
-# -----------------------
-# Connection: SQLAlchemy first, DB-API fallback
-# -----------------------
 @st.cache_resource(show_spinner=False)
 def dbx_conn(host: str, http_path: str, token: str):
     """
-    Returns ("sqlalchemy", engine) or ("dbapi", conn).
-    Tries SQLAlchemy dialect (databricks+connector://) first.
-    Falls back to DB-API via databricks-sql-connector if dialect isn't available.
+    Return ("sqlalchemy", engine) or ("dbapi", conn).
     """
-    # Try SQLAlchemy dialect path
+    # try SQLAlchemy dialect
     try:
-        # Explicitly import registers the entry point for the dialect
-        import databricks.sqlalchemy as _  # noqa: F401
+        import databricks.sqlalchemy as _  # registers entry point
         from sqlalchemy import create_engine
         url = f"databricks+connector://token:{token}@{host}?http_path={http_path}"
         eng = create_engine(url)
-        # test a lightweight connection
-        with eng.connect() as _c:
-            pass
+        with eng.connect() as _c: pass
         return ("sqlalchemy", eng)
     except Exception as e:
         st.warning(f"SQLAlchemy dialect not available or failed ({e}). Falling back to DB-API connector…")
 
-    # Fallback: DB-API
-    try:
-        from databricks import sql as dbsql
-        conn = dbsql.connect(server_hostname=host, http_path=http_path, access_token=token)
-        return ("dbapi", conn)
-    except Exception as e:
-        raise RuntimeError(f"Both SQLAlchemy and DB-API paths failed: {e}")
+    # fallback DB-API
+    from databricks import sql as dbsql
+    conn = dbsql.connect(server_hostname=host, http_path=http_path, access_token=token)
+    return ("dbapi", conn)
 
-# -----------------------
-# Load KG tables (works for both connection modes)
-# -----------------------
-@st.cache_data(show_spinner=True, ttl=600)
-def load_kg(conn_tuple, _refresh_key: int = 0):
-    mode, handle = conn_tuple
+# ---- tiny helpers ----
+def _coerce_embedding_cell(x):
+    if isinstance(x, (list, tuple, np.ndarray)):
+        return np.array(x, dtype="float32")
+    if isinstance(x, str):
+        try:  return np.array(json.loads(x), dtype="float32")
+        except Exception: return np.array(ast.literal_eval(x), dtype="float32")
+    return np.array([], dtype="float32")
 
+def _read_sql_df(mode_handle, query: str):
+    mode, handle = mode_handle
     if mode == "sqlalchemy":
         from sqlalchemy import text
-        nodes = pd.read_sql(text(f"SELECT * FROM {FULL_NODES}"), handle)
-        edges = pd.read_sql(text(f"SELECT * FROM {FULL_EDGES}"), handle)
-        emb   = pd.read_sql(text(f"SELECT * FROM {FULL_EMB}"),   handle)
+        return pd.read_sql(text(query), handle)
     else:
-        # DB-API: pandas can read_sql with a DB-API connection directly
-        nodes = pd.read_sql(f"SELECT * FROM {FULL_NODES}", handle)
-        edges = pd.read_sql(f"SELECT * FROM {FULL_EDGES}", handle)
-        emb   = pd.read_sql(f"SELECT * FROM {FULL_EMB}",   handle)
+        # DB-API path
+        return pd.read_sql(query, handle)
 
-    # Normalize properties
+# ---- fast, limited loads with explicit projections ----
+@st.cache_data(show_spinner=True, ttl=600)
+def load_kg(mode_handle, max_rows: int, max_emb: int, _refresh_key: int = 0):
+    # only columns we need
+    nodes_sql = f"""
+        SELECT node_id, table, label,
+               CASE WHEN column_exists('{CATALOG}','{SCHEMA}','{NODES_T}','props_json') THEN props_json ELSE NULL END AS props_json
+        FROM {FULL_NODES}
+        LIMIT {int(max_rows)}
+    """
+    edges_sql = f"""
+        SELECT src, dst, rel, src_table, dst_table
+        FROM {FULL_EDGES}
+        LIMIT {int(max_rows)}
+    """
+    emb_sql = f"""
+        SELECT node_id, embedding, dim
+        FROM {FULL_EMB}
+        LIMIT {int(max_emb)}
+    """
+
+    t0 = time.time()
+    nodes = _read_sql_df(mode_handle, nodes_sql)
+    edges = _read_sql_df(mode_handle, edges_sql)
+    emb   = _read_sql_df(mode_handle, emb_sql)
+    t1 = time.time()
+
+    # normalize props
     if "props_json" in nodes.columns:
         nodes["props_dict"] = nodes["props_json"].apply(lambda s: json.loads(s) if isinstance(s, str) and s else {})
     elif "props" in nodes.columns:
@@ -107,26 +108,54 @@ def load_kg(conn_tuple, _refresh_key: int = 0):
     else:
         nodes["props_dict"] = [{} for _ in range(len(nodes))]
 
-    # Normalize embeddings
+    # embeddings
     emb["embedding"] = emb["embedding"].apply(_coerce_embedding_cell)
     emb = emb[emb["embedding"].apply(lambda a: a.size > 0)].reset_index(drop=True)
 
-    # Align embeddings with node metadata
+    # align
     if len(emb) == 0:
         joined = pd.DataFrame(columns=["node_id","embedding","dim","table","label"])
-        X = np.zeros((0, 1), dtype="float32")
-        ids = []
+        X = np.zeros((0,1), dtype="float32"); ids = []
     else:
-        joined = pd.merge(
-            emb[["node_id", "embedding", "dim"]],
-            nodes[["node_id", "table", "label"]],
-            on="node_id",
-            how="inner",
-        )
+        joined = pd.merge(emb[["node_id","embedding","dim"]],
+                          nodes[["node_id","table","label"]],
+                          on="node_id", how="inner")
         X = np.vstack(joined["embedding"].to_list()).astype("float32") if len(joined) else np.zeros((0,1), dtype="float32")
         ids = joined["node_id"].tolist()
 
-    return nodes, edges, joined, X, ids
+    load_secs = round(t1 - t0, 2)
+    return nodes, edges, joined, X, ids, load_secs
+
+# ---- connection + ping button ----
+host, http_path, token = resolve_dbx_config()
+if not (host and http_path and token):
+    st.error("Missing Databricks connection values. Provide Hostname, HTTP Path, and PAT in Secrets or the sidebar.")
+    st.stop()
+
+try:
+    conn_tuple = dbx_conn(host, http_path, token)
+except Exception as e:
+    st.error(f"Failed to connect to Databricks: {e}")
+    st.stop()
+
+# Optional: ping to see if the warehouse is waking up
+if PING:
+    try:
+        mode, h = conn_tuple
+        if mode == "sqlalchemy":
+            from sqlalchemy import text
+            df_ping = pd.read_sql(text("SELECT 1 AS ok"), h)
+        else:
+            df_ping = pd.read_sql("SELECT 1 AS ok", h)
+        st.success(f"Ping OK: {df_ping.iloc[0]['ok']}")
+    except Exception as e:
+        st.error(f"Ping failed: {e}")
+
+# ---- load with limits and show timing ----
+with st.spinner("Loading KG (limited)…"):
+    nodes, edges, joined, X, ids, secs = load_kg(conn_tuple, MAX_ROWS, MAX_EMB, st.session_state.get("_refresh_key", 0))
+st.caption(f"Loaded in {secs}s (nodes≤{MAX_ROWS}, edges≤{MAX_ROWS}, embeddings≤{MAX_EMB})")
+
 
 # -----------------------
 # Retrieval & LLM
