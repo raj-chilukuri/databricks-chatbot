@@ -1,17 +1,12 @@
-# requirements.txt
+# requirements.txt - Fixed for Python 3.13 / SQLAlchemy TypingOnly assertion
 streamlit
-
-# your other deps...
-# langchain, databricks, etc (keep them if you already use them)
 databricks-sqlalchemy==2.0.8
-SQLAlchemy>=2.0.41,<3
-
-# (optional) if you already had these, keep them at your preferred versions
-# numpy==1.26.4
-# protobuf==4.25.3
-# langchain
-# langchain-core
-# langchain-community
-# langchain-openai
-# python-dotenv
-# altair
+SQLAlchemy>=2.0.31,<3.0
+numpy==1.26.4
+protobuf==4.25.3
+langchain
+langchain-core
+langchain-community
+langchain-openai
+python-dotenv
+altair
