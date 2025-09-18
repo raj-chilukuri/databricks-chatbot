@@ -4,6 +4,5 @@ pandas
 numpy
 SQLAlchemy>=2.0.41,<3
 databricks-sqlalchemy==2.0.8
-databricks-sql-connector
-python-dotenv
+databricks-sql-connector>=3.1.0
 openai>=1.0.0
